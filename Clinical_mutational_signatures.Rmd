@@ -1,0 +1,755 @@
+---
+title: "SBS Mutational Signatures on High TMB samples"
+author: "Jaime Davila/Zach Fogarty"
+date: "2025-06-11"
+output:
+  html_document:
+    keep_md: yes  
+editor_options:
+  chunk_output_type: console
+---
+```{r echo=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+
+```{r}
+library(kableExtra)
+library(arsenal)
+library(lsa)
+library(tidyverse)
+library(NMF)
+library(MutationalPatterns)
+```
+
+# Loading the data
+
+We started by loading the sample information and the mutational context matrix for all the highly mutated samples:  
+
+```{r}
+high_tmb_df <- read_csv("sample_info.csv")
+mut_mat <- read.table("sbs_168.tsv", header=TRUE)
+rownames(mut_mat) <- mut_mat$MutationType
+mut_mat$MutationType <- NULL
+summary(colSums(mut_mat))
+```
+
+
+We perform an NMF analysis using up to `k=8`:
+
+
+```{r cache=TRUE}
+estimate <- nmf(mut_mat, rank = 2:8, method = "brunet", 
+                nrun = 40, seed = 123456, .opt = "v-p")
+```
+
+And plot the fitness of the rank.
+
+
+```{r}
+plot(estimate, what=c("rss"))+
+   theme_minimal()+
+   theme(plot.title = element_blank(),
+         strip.text.x = element_blank(),
+         legend.position="none",
+         axis.text.y = element_text(size=15),
+         axis.text.x = element_text(size=15),
+         axis.title.x = element_text(size=15),
+         )
+
+```
+
+# Plotting and identifying the signature archetypes
+
+Notice that the elbow on the RSS plot starts around 5-6, so after some experimentation we will settle for `k=6` and plot the mutational profiels
+
+```{r cache=TRUE}
+nmf_res <- extract_signatures(mut_mat, rank=6, nrun=40,
+                              single_core=TRUE,seed = 123456)
+sig_names <- c("A","B","C","D","E","F")
+colnames(nmf_res$signatures)=sig_names
+rownames(nmf_res$contribution)=sig_names
+plot_96_profile(nmf_res$signatures)
+```
+
+We change the order so they can better displayed
+
+```{r}
+fixed_order = c("D", "B", "E","C","F","A")
+nmf_res$signatures <-  nmf_res$signatures[,fixed_order]
+nmf_res$contribution <- nmf_res$contribution[fixed_order,]
+
+colnames(nmf_res$signatures)=sig_names
+rownames(nmf_res$contribution)=sig_names
+plot_96_profile(nmf_res$signatures)
+```
+
+And we can plot the similarity against the COSMIC mutational signatures:
+
+```{r}
+cosmic <- as.matrix(
+  read.table('COSMIC_v3.2_SBS_GRCh37.txt', header=TRUE)[,-1])
+cos_sim_samples_signatures <- 
+  cos_sim_matrix(nmf_res$signatures, cosmic)
+
+plot_cosine_heatmap(cos_sim_samples_signatures, cluster_cols=TRUE)
+```
+
+Now we repeat the plots using more informative names
+
+```{r}
+full_names=c("TMZ","UV","dMMR","APOBEC","Tobacco","Unknown")
+colnames(nmf_res$signatures)=full_names
+rownames(nmf_res$contribution)=full_names
+```
+
+Which brings us to figure 1
+
+```{r}
+row_di=(
+  c("A.A","","A.G","","C.A","","C.G","",
+    "G.A","","G.G","", "T.A","","T.G",""))
+omit_di <- rep(row_di,4)
+
+
+(fig1a <- plot_96_profile(nmf_res$signatures)+
+   scale_x_discrete(labels=omit_di)+
+   theme(strip.text.y = element_text(angle = 0,size=15),
+         strip.text.x = element_text(angle = 0,size=15),
+         axis.title.x = element_text(size=15),
+         axis.title.y = element_text(size=15),
+         axis.text.x  = element_text(size=10, angle=90),
+        legend.position = "none"))
+
+```
+
+And this should go be supp 2
+
+```{r}
+cos_sim_samples_signatures <-
+  cos_sim_matrix(nmf_res$signatures, cosmic[,1:27])
+
+plot_cosine_heatmap(cos_sim_samples_signatures, cluster_cols=TRUE) 
+```
+
+Notice the cosine similarities for:
+
+* APOBEC: To `SBS2` and `SBS13`
+```{r}
+round(cos_sim_samples_signatures[4,c("SBS2","SBS13")],2)
+```
+
+Notice that it is very close to the sum of signatures 2 and 13
+
+```{r}
+apobec <- cosmic[,"SBS2"] + cosmic[,"SBS13"]
+round(cosine(
+  as.matrix(cbind(apobec, nmf_res$signatures[,4])))[1,2],2)
+```
+
+
+* Tobacco 
+
+```{r}
+round(cos_sim_samples_signatures[5,c("SBS4")],2)
+```
+
+* MMR
+
+```{r}
+round(cos_sim_samples_signatures[3,c("SBS1","SBS6","SBS15")],2)
+```
+
+And here we combined a couple of them
+
+```{r}
+dMMR <- cosmic[,"SBS6"] + cosmic[,"SBS1"] + cosmic[,"SBS15"]
+round(cosine(
+  as.matrix(cbind(dMMR, nmf_res$signatures[,3])))[1,2],2)
+
+```
+
+
+* UV
+```{r}
+round(cos_sim_samples_signatures[2,c("SBS7a","SBS7b")],2)
+```
+
+And a higher similarity to the linear combination of `SBS7a` and `SBS7b`:
+```{r}
+uv <- cosmic[,"SBS7a"] + cosmic[,"SBS7b"]
+round(cosine(
+  as.matrix(cbind(uv, nmf_res$signatures[,2])))[1,2],2)
+
+```
+
+* TMZ
+
+```{r}
+round(cos_sim_samples_signatures[1,c("SBS11")],2)
+```
+
+* Aging/Unknown
+
+```{r}
+which.max(cos_sim_samples_signatures[6,])
+round(cos_sim_samples_signatures[6,c("SBS5")],2)
+#Let's see how flat it is
+flat <- rep (1/96,96)
+round(cosine(
+  as.matrix(cbind(nmf_res$signatures[,6], flat)))[1,2],2)
+```
+
+
+
+
+# Plotting sample decomposition
+
+Now let's look at things according to the samples. We will plot signature contribution and do some hierarchical clustering. We start by creating a function that given an nmf object, returns the sample percentual contribution from each mutational signature:
+
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+
+get_pct_sig <- function(nmf_res) {
+  contribution <- t(nmf_res$contribution)
+  contribution_norm <- contribution / rowSums(contribution)
+
+  return(contribution_norm)  
+}
+```
+
+Now we will create a function that given the matrix of mutational signature contributions, plots this matrix as a heatmap dividing into a particular number of clusters
+
+```{r}
+plot_sig_heatmap <- function(pct_matrix, numclusters, 
+                             labels, cluster_method="complete"){
+
+    contribution_palette=colorRampPalette(brewer.pal(n = 9, name = "YlGnBu"))(50)
+    Heatmap(pct_matrix, 
+           clustering_method_rows = cluster_method,
+           row_split=numclusters,
+           show_row_names=FALSE,
+           row_gap = unit(4, "mm"),
+           row_title = labels,
+           row_title_rot = 0,
+           name='Relative\ncontribution',
+
+           cluster_columns=FALSE,
+           col = contribution_palette,
+           column_names_rot = 0,
+           column_names_centered = TRUE,
+           border=TRUE)
+
+}
+```
+
+We will test our function using 6 clusters and add labels for each of the clusters
+
+```{r}
+numclusters=6
+cluster_method="ward.D2"
+contribution_mat <- get_pct_sig(nmf_res)
+cluster_labels =
+  c("TMZ-high", "UV-high","dMMR-high",
+    "APOBEC-high","Tobacco-high", "Miscellaneous")
+
+set.seed(321)
+plot_sig_heatmap(contribution_mat,numclusters,
+                 cluster_labels,cluster_method)
+```
+
+We will extend our function by including additional tracks representing the MsI status and the tissue of origin:
+
+```{r}
+plot_ext_sig_heatmap <- function(pct_matrix, numclusters, 
+                                 labels, sample_tbl,
+                                 cluster_method="complete"){
+
+    contribution_palette=
+      colorRampPalette(brewer.pal(n = 9, name = "YlGnBu"))(50)
+    MSI_color <-  brewer.pal(n=3,name="Greens")
+    names(MSI_color) <- c("MSS","MSI-L","MSI-H")
+    
+    MUP_color <- brewer.pal(n=4, name="Pastel2")
+    
+    names(MUP_color) = rev(c('Soft T. Sarc. NOS', 
+                             'Sal. gland. NOS',
+                             'Mel. Unk. Prim.', 'Other'))
+    
+    tissue_names <- levels(sample_tbl$origin)
+    tissue_color<-colorRampPalette(
+      brewer.pal(n =length(tissue_names)-1, 
+      name = "Set3"))(length(tissue_names))
+    names(tissue_color) <- tissue_names
+    
+    annotation <- rowAnnotation(`MSI\nstatus`=sample_tbl$MSI,
+                                 `Tissue\norigin`=
+                                  sample_tbl$origin,
+                                 `Selected\nDiagnosis\n`=
+                                  sample_tbl$other.dx,
+                                 col=list(`MSI\nstatus`=
+                                            MSI_color,
+                                      `Tissue\norigin`=
+                                        tissue_color,                                                     `Selected\nDiagnosis\n`=
+                                        MUP_color),
+                                 simple_anno_size = unit(1, "cm"),
+                                 annotation_name_gp=
+                                  gpar(fontsize = 12),
+                                 annotation_name_rot =0,
+                                 gap=unit(0.7,"cm"))
+        
+    Heatmap(pct_matrix, 
+           clustering_method_rows = cluster_method,
+           row_split=numclusters,
+           show_row_names=FALSE,
+           cluster_columns=FALSE,
+           col = contribution_palette,
+           column_names_rot = 0,
+           column_names_centered = TRUE,
+           column_title = "Mutational Signature Contribution", 
+           column_title_side = "bottom",
+           
+           row_gap = unit(4, "mm"),
+           row_title = labels,
+           row_title_rot = 0,
+           border=TRUE,
+           name='Percent\nmutational\nsignature',
+           
+           right_annotation=annotation
+    )
+  
+}
+```
+
+And let's use our function to create our Figure 1B:
+
+
+```{r}
+tissue_tbl <- high_tmb_df %>%
+  filter(primary.tissue!="other" &
+           primary.tissue!="unknown primary") 
+  
+tissue_levels <- sort(table(droplevels(tissue_tbl)$primary.tissue),
+                      decreasing=TRUE) %>% rownames()
+
+tissue_levels <- c(tissue_levels, "other", "unknown primary")
+
+
+tissue_levels[length(tissue_levels)]="unknown"
+
+levels.other = c('Soft T. Sarc. NOS', 'Sal. gland. NOS',
+                 'Mel. Unk. Prim.', 'Other') 
+
+sample_tbl <- high_tmb_df |>
+  mutate(other.dx=factor(other.dx, levels.other)) |>
+  select(newid, microsatellite.instability.status, 
+         primary.tissue, other.dx) |>
+  dplyr::rename(MSI = microsatellite.instability.status,
+                origin=primary.tissue)|>
+  mutate(origin = str_replace(origin,"unknown primary","unknown"))|>
+  mutate(origin = str_to_title(origin))|>
+  mutate(origin =factor(origin, str_to_title(tissue_levels))) 
+
+
+(fig1b <- plot_ext_sig_heatmap(100*contribution_mat,numclusters,
+                               cluster_labels,sample_tbl,cluster_method))
+
+```
+
+
+We originally set the number of clusters to 6 because we had 6 mutational signatures, however let's make sure it makes sense using the WSS and silhouette methods:
+
+
+```{r}
+library(factoextra)
+hc_method <- function (x,k) {
+  hclust(x,k,hc_method="ward.D2")
+}
+
+fviz_nbclust(contribution_mat, hcut, method = "wss", k.max = 10) + 
+  theme_minimal() + 
+  ggtitle("WSS elbow method")
+
+fviz_nbclust(contribution_mat, hcut, method = "silhouette", 
+             k.max = 10) + 
+  theme_minimal() +
+  theme( plot.title = element_blank(),
+        axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        axis.text.x=element_text(size=15),
+        axis.text.y=element_text(size=15))
+
+```
+
+# Relationship between dMMR and MSI
+
+We would like to see the relationship between the amount of TMB explained by dMMR and microsatellite status and number of indels. First let's the relevant information in a tibble
+
+```{r}
+mmr_pct_tbl <- tibble (newid = rownames((contribution_mat)),
+                   dmmr_pct = contribution_mat[,"dMMR"]) 
+
+mmr_tbl <- high_tmb_df |>
+  select(newid,microsatellite.instability.status,MutPerMB) |>
+  dplyr::rename(MSI = microsatellite.instability.status)|>
+  inner_join(mmr_pct_tbl) |>
+  mutate(tmb_mmr=dmmr_pct*MutPerMB)
+```
+
+And let's look at the distribution of TMB from dMMR across MSS vs MSI-h
+
+```{r}
+mmr_binary_tbl <- mmr_tbl |>
+  filter(MSI!="MSI-L")
+```
+
+
+```{r}
+mmr_binary_tbl |>
+  ggplot(aes(x=factor(MSI),y=dmmr_pct))+
+  geom_boxplot()+
+  theme_minimal()+
+  scale_y_continuous(
+    name="Fraction of mutations from dMMR signature")+
+  scale_x_discrete("Microsatellite instability status") +
+  theme(axis.title.x=element_text(size=15),
+        axis.title.y=element_text(size=15),
+        axis.text.x=element_text(size=12),
+        axis.text.y=element_text(size=12))
+mosaic::favstats(dmmr_pct~MSI, data=mmr_binary_tbl)
+
+```
+
+
+# Exploring each cluster
+
+Let's create a tibble with information about the clusters for each sample
+
+```{r}
+num_signatures <- ncol(contribution_mat)
+hc_sample <- hclust(dist(contribution_mat), 
+                    method = cluster_method)
+clusters <- cutree(hc_sample, k=numclusters)
+cluster_names <- c("Misc.","APOBEC-high","Tobacco-high",
+                   "UV-high","dMMR-high","TMZ-high")
+
+cluster_levels <- c("TMZ-high","UV-high","dMMR-high",
+                    "APOBEC-high","Tobacco-high","Misc.")
+
+mut_process_tbl <- contribution_mat %>%
+    as_tibble() %>%
+    mutate(sample_id = rownames(contribution_mat)) %>%
+    mutate(cluster_id = factor(cluster_names[clusters],
+                               levels=cluster_levels))
+
+```
+
+And summarize the information by cluster:
+
+
+```{r}
+mut_process_prop <- tableby(cluster_id ~ 
+                        TMZ+UV+dMMR+APOBEC+Tobacco+Unknown,
+                      data=mut_process_tbl, 
+                      control=
+                        tableby.control(test=FALSE, total=FALSE, 
+                                        numeric.stats=
+                                          c("meansd", "q1q3", "range")))
+```
+
+
+```{r results='asis'}
+summary(mut_process_prop)
+```
+
+
+For each of our clusters we find the mutational profile center by adding the counts corresponding to each dinucleotide context:
+
+```{r}
+cons_tbl <- data.frame(matrix(0, ncol =numclusters, nrow = 96))
+colnames(cons_tbl) <- seq(1,numclusters)
+row.names(cons_tbl) <- row.names(nmf_res$signatures)
+
+for (i in 1:numclusters) {
+    sample_ids <- names(clusters[clusters==i])
+    cons_tbl[,i] <- rowSums(mut_mat[,sample_ids])
+}
+colnames(cons_tbl)=cluster_names
+
+```
+
+
+
+
+And we create our supplementary figures 4
+
+```{r}
+plot_96_profile(cons_tbl)
+
+```
+
+# Cluster description
+
+We start by joining the mutational signature information from `mut_process_tbl` into the clinical information from `clinical_tbl`
+
+
+```{r}
+nclinical_tbl <- high_tmb_df %>%
+  inner_join(mut_process_tbl, by = join_by(newid==sample_id)) %>%
+  arrange(cluster_id)
+```
+
+
+Let's get a table of TMB for the five designated clusters and get some summaries
+
+```{r results='asis'}
+cluster_levels <- c("TMZ-high","UV-high","dMMR-high",
+                    "APOBEC-high","Tobacco-high")
+tmb_clinical_tbl <- nclinical_tbl %>%
+  filter(cluster_id != 'Misc.') |>
+  mutate(cluster_id = factor(cluster_id,levels=cluster_levels))
+
+cluster_tbl <- tableby(cluster_id ~  MutPerMB ,
+                data=tmb_clinical_tbl, 
+                total=FALSE,
+                control=tableby.control(test=TRUE, total=TRUE, 
+                                        numeric.stats=c("meansd", "median","q1q3", "range")))
+
+
+labels(cluster_tbl) <-  c(MutPerMB="Mut/Mb")
+
+
+summary(cluster_tbl, digits=1, 
+        digits.p=4, digits.pct=0, pfootnote=TRUE)
+
+
+```
+
+We can visualize the data using the following plot
+
+```{r}
+ggplot(tmb_clinical_tbl, aes(x=cluster_id, y=MutPerMB))+
+       geom_boxplot()+
+       geom_dotplot(binaxis = "y", stackdir = "center", dotsize=.6)+
+       scale_y_log10(name="Mutations per MB",limits=c(10,300))+
+       scale_x_discrete(name="Cluster") +
+       theme_minimal()+
+       theme(axis.title.x=element_text(size=20),
+             axis.title.y=element_text(size=20),
+             axis.text.x=element_text(size=15),
+             axis.text.y=element_text(size=15))
+
+
+```
+
+And below we can see the results for the linear model on the log10 TMB for each of the named cluster
+
+```{r}
+cluster_levels <- c("TMZ-high","UV-high","dMMR-high",
+                    "APOBEC-high","Tobacco-high")
+tmb_clinical_tbl <- tmb_clinical_tbl |>
+  mutate(cluster_id = factor(cluster_id, levels=rev(cluster_levels)))
+
+tmb_model <- lm(log10(MutPerMB)~cluster_id,tmb_clinical_tbl)
+summary(tmb_model)
+
+par(mfrow=c(2,2)) # Change the panel layout to 2 x 2
+plot(tmb_model)
+par(mfrow=c(1,1))
+
+conf_tbl <- 10^confint(tmb_model) |>
+  as_tibble()
+library(broom)
+tidy(tmb_model) |>
+  select(term,estimate,p.value) |>
+  mutate(estimate=10^estimate) |>
+  cbind(conf_tbl) |>
+  mutate(term=str_replace(term,"cluster_id","")) |>
+  mutate(term=str_replace(term,"\\(Intercept\\)","Tobacco-high")) |>
+  mutate(estimate = format(estimate,digits=2, nsmall=0),
+         p.value = format(p.value, digits=2, scientific=TRUE),
+         `2.5 %` = format(`2.5 %`,digits=2, nsmall=0),
+         `97.5 %` = format(`97.5 %`,digits=3, nsmall=0)) |>
+  kbl() |>
+  kable_styling() 
+
+```
+
+# Cluster and MSI-H
+
+We first establish the p-value of the association between dMMR-high and MSI-H
+
+
+```{r}
+mss_vs_msih_table <- nclinical_tbl |>
+ mutate(microsatellite.instability.status = 
+          if_else(microsatellite.instability.status=="MSI-H",
+                  "MSI-H","other")) |>
+  mutate(cluster_id = if_else(cluster_id=="dMMR-high",
+                              "dMMR-high","other"))
+
+
+table(mss_vs_msih_table$microsatellite.instability.status, 
+      mss_vs_msih_table$cluster_id) |>
+  fisher.test()
+```
+
+
+# Clusters and tissue of origin
+
+For each of the cluster we can summarize the tissue type where it originated:
+
+
+```{r results='asis'}
+ntissue_levels <- c("unknown",tissue_levels[1:length(tissue_levels)-1])
+cluster_levels <- c("UV-high","Tobacco-high","TMZ-high",
+                    "APOBEC-high","dMMR-high")
+
+
+nclinical_tbl <- nclinical_tbl %>%
+  filter(cluster_id!="Miscellaneous") |>
+  mutate(primary.tissue  = str_replace(primary.tissue,"unknown primary", "unknown")) %>%
+  mutate(primary.tissue=factor(primary.tissue,levels=ntissue_levels))  %>%
+  mutate(cluster_id = factor(cluster_id, levels=cluster_levels))
+  
+
+cluster_tbl_tissue <- tableby(cluster_id ~ primary.tissue ,
+                        data=nclinical_tbl, 
+                        control=
+                          tableby.control(test=FALSE, total=TRUE, 
+                                        numeric.stats=c("Nmiss", "meansd", "q1q3", "range")))
+
+labels(cluster_tbl_tissue) <-  c(primary.tissue="Primary site")
+
+summary(cluster_tbl_tissue, digits.pct=0)
+```
+
+If we exclude "unknown" tissue types we have 2 clusters where one tissue has over 60%  (Tobacco-High and UV-high)
+
+
+We are interested in calculating a p-value for the association of a particular tissue in a particular cluster
+
+```{r}
+# We calculate the p-value of the proportion of cases from most abundant
+# tissue in each cluster
+calc_tissue_pvalue <- function (clusterid, clinical_tbl) {
+  
+  #Determine most abundant primary tissue in the cluster
+  max_tissue <- clinical_tbl %>% 
+    filter (cluster_id == clusterid) %>% 
+    filter (primary.tissue!="unknown primary") %>%
+    dplyr::count(primary.tissue) %>% 
+    dplyr::slice_max(n) %>%
+    pull(primary.tissue)
+  
+  test_tbl <- clinical_tbl %>%
+    mutate(iscluster = if_else(cluster_id==clusterid,1,0)) %>%
+    mutate(istissue = if_else(primary.tissue==max_tissue,1,0))
+  
+  fisher.test(table(test_tbl$iscluster,test_tbl$istissue))$p.value
+}
+```
+
+And we calculate the p-value of the association for UV-high and Tobacco-high
+
+```{r}
+calc_tissue_pvalue("UV-high",nclinical_tbl)
+calc_tissue_pvalue("Tobacco-high",nclinical_tbl)
+```
+
+
+## Unknown origin
+
+All of the cases:
+
+```{r}
+nclinical_tbl %>%
+  filter(primary.tissue == "unknown") %>%
+  dplyr::arrange(cluster_id) %>%
+  select(newid,primary.tissue,SubmittedDiagnosis,
+         cluster_id,MutPerMB) %>%
+  kbl() %>%
+  kable_styling()
+```
+
+Summary of the UV and Tobacco cases
+
+```{r}
+nclinical_tbl %>%
+  dplyr::filter (cluster_id=="UV-high" | cluster_id=="Tobacco-high") |>
+  dplyr::filter(primary.tissue == "unknown") |>
+  dplyr::count(SubmittedDiagnosis) |>
+  arrange(-n) |>
+  kbl() %>%
+  kable_styling()
+
+```
+
+
+## Melanoma of unknown primary
+
+Let's find out how many cases of melanoma unknow-primary are and in what cluster they are:
+
+```{r}
+nclinical_tbl %>%
+  filter(other.dx == 'Mel. Unk. Prim.') %>%
+  dplyr::count(cluster_id)
+```
+
+Summary:
+
+```{r}
+nclinical_tbl %>%
+  filter(other.dx == 'Mel. Unk. Prim.') %>%
+  dplyr::count(SubmittedDiagnosis)
+```
+
+
+
+
+
+And here is a breakdown
+
+```{r}
+nclinical_tbl %>%
+  filter(other.dx == 'Mel. Unk. Prim.') %>%
+  dplyr::arrange(cluster_id) %>%
+  select(newid,primary.tissue,SubmittedDiagnosis,
+         cluster_id,MutPerMB) %>%
+  kbl() %>%
+  kable_styling()
+```
+
+
+And let's calculate the p-value
+
+```{r}
+mup_table <- nclinical_tbl |>
+mutate(mup=if_else(other.dx=='Mel. Unk. Prim.', "Yes","No"))
+
+
+table(mup_table$mup, 
+      mup_table$cluster_id) |>
+  fisher.test()
+```
+
+
+## Tables
+
+Table with high tmb cases:
+
+
+```{r}
+nclinical_tbl |>
+  select(newid,cluster_id,TMZ,UV,dMMR, APOBEC, Tobacco, Unknown,
+         primary.tissue,other.dx,SubmittedDiagnosis,
+         MutPerMB,microsatellite.instability.status) |>
+  write_csv("high_tmb_cases.csv")
+ 
+         
+```
+
